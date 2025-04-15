@@ -236,12 +236,28 @@ class LogAnalyzer:
                 message).strip()
             message = message.lstrip(':').strip()
 
+            # Extract and store any JSON data in the message
+            metadata = {}
+            try:
+                # Look for JSON-like content in the message
+                json_match = re.search(r'(\{.*\})', message)
+                if json_match:
+                    json_str = json_match.group(1)
+                    # Try to parse it as JSON
+                    json_data = json.loads(json_str)
+                    if isinstance(json_data, dict):
+                        metadata = json_data
+                        # Remove the JSON from the message
+                        message = re.sub(r'(\{.*\})', '', message).strip()
+            except (json.JSONDecodeError, ValueError):
+                pass
+
             return LogEntry(
                 timestamp=timestamp or datetime.datetime.now(),
                 level=level,
                 service=service,
                 message=message,
-                metadata={}
+                metadata=metadata
             )
 
     def _parse_timestamp(
@@ -335,7 +351,8 @@ class LogAnalyzer:
         error_counts = defaultdict(int)
         for entry in self.entries:
             if entry.level in ["ERROR", "CRITICAL"]:
-                error_counts[entry.service] += 1
+                service_key = entry.service.lower()
+                error_counts[service_key] += 1
         return dict(error_counts)
 
     def get_activity_timeline(
@@ -393,7 +410,15 @@ class LogAnalyzer:
         # placeholders
         templates = []
 
+        # Create a cache for processed messages to avoid duplicate processing
+        processed_messages = {}
+
         for entry in self.entries:
+            # Skip if we've already processed this exact message
+            if entry.message in processed_messages:
+                templates.append(processed_messages[entry.message])
+                continue
+
             # Replace IPs, timestamps, UUIDs, etc. with placeholders
             template = entry.message
             template = re.sub(
@@ -404,8 +429,15 @@ class LogAnalyzer:
                               '<UUID>', template)
             template = re.sub(r'\b\d{4}-\d{2}-\d{2}[T ]?\d{2}:\d{2}:\d{2}(?:\.\d+)?\b',
                               '<TIMESTAMP>', template)
+            # Add URL pattern detection
+            template = re.sub(
+                r'https?://[\w\-\.]+(?:/[\w\-\./]*)?',
+                '<URL>',
+                template)
             template = re.sub(r'\b\d+\b', '<NUMBER>', template)
 
+            # Store in cache
+            processed_messages[entry.message] = template
             templates.append(template)
 
         # Count template occurrences
@@ -476,3 +508,69 @@ class LogAnalyzer:
         }
 
         return report
+
+    def analyze_error_cascades(
+            self, time_window: int = 60) -> List[Dict[str, Any]]:
+        """
+        Analyze error cascades across services within a specified time window.
+
+        This method identifies chains of errors that occur across different services
+        within a given time window, helping detect error propagation in distributed systems.
+
+        Args:
+            time_window: Time window in seconds to consider for related errors
+
+        Returns:
+            List of error cascade information, each containing:
+            - start_time: When the cascade began
+            - services: List of services involved in order
+            - error_count: Total number of errors in the cascade
+            - duration: Total duration of the cascade in seconds
+        """
+        if not self.entries:
+            return []
+
+        error_entries = sorted(
+            [e for e in self.entries if e.level in ["ERROR", "CRITICAL"]],
+            key=lambda x: x.timestamp
+        )
+
+        if not error_entries:
+            return []
+
+        cascades = []
+        current_cascade = None
+
+        for entry in error_entries:
+            if (not current_cascade or
+                    (entry.timestamp - current_cascade["last_error"]).total_seconds() > time_window):
+                if current_cascade and len(current_cascade["services"]) > 1:
+                    cascades.append({
+                        "start_time": current_cascade["start_time"].isoformat(),
+                        "services": current_cascade["services"],
+                        "error_count": current_cascade["error_count"],
+                        "duration": (current_cascade["last_error"] -
+                                     current_cascade["start_time"]).total_seconds()
+                    })
+                current_cascade = {
+                    "start_time": entry.timestamp,
+                    "last_error": entry.timestamp,
+                    "services": [entry.service],
+                    "error_count": 1
+                }
+            else:
+                if entry.service not in current_cascade["services"][-1:]:
+                    current_cascade["services"].append(entry.service)
+                current_cascade["last_error"] = entry.timestamp
+                current_cascade["error_count"] += 1
+
+        if current_cascade and len(current_cascade["services"]) > 1:
+            cascades.append({
+                "start_time": current_cascade["start_time"].isoformat(),
+                "services": current_cascade["services"],
+                "error_count": current_cascade["error_count"],
+                "duration": (current_cascade["last_error"] -
+                             current_cascade["start_time"]).total_seconds()
+            })
+
+        return cascades
