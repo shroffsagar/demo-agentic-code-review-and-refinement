@@ -1,3 +1,4 @@
+from typing import Tuple
 """
 Log Analyzer - A utility for analyzing and extracting insights from log files.
 
@@ -141,124 +142,142 @@ class LogAnalyzer:
 
         return self.entries
 
-    def _parse_log_line(
-            self, line: str, custom_pattern: Optional[str] = None) -> Optional[LogEntry]:
-        """
-        Parse a single log line into a structured entry.
+    def _extract_json_metadata(self, message: str) -> Tuple[str, dict]:
+    """
+    Extract JSON metadata from the log message.
 
-        Args:
-            line: The log line text
-            custom_pattern: Optional regex pattern to use
+    Args:
+        message: The log message string.
 
-        Returns:
-            LogEntry object or None if line couldn't be parsed
-        """
-        line = line.strip()
-        if not line:
-            return None
+    Returns:
+        A tuple of (message with JSON removed, metadata dict).
+    """
+    try:
+        json_match = re.search(r'(\{.*?\})', message)
+        if json_match:
+            json_str = json_match.group(1)
+            json_data = json.loads(json_str)
+            if isinstance(json_data, dict):
+                # Remove only the first occurrence of the JSON substring
+                message = re.sub(r'(\{.*?\})', '', message, count=1).strip()
+                return message, json_data
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return message, {}
 
-        if custom_pattern:
-            # Use custom pattern if provided
-            pattern = re.compile(custom_pattern)
-            match = pattern.search(line)
-            if match:
-                # Extract fields based on named groups in the pattern
-                fields = match.groupdict()
 
-                # Parse timestamp
-                timestamp_str = fields.get('timestamp', '')
-                timestamp = self._parse_timestamp(timestamp_str)
+def _parse_log_line(self, line: str,
+                    custom_pattern: Optional[str] = None) -> Optional[LogEntry]:
+    """
+    Parse a single log line into a structured entry.
 
-                return LogEntry(
-                    timestamp=timestamp or datetime.datetime.now(),
-                    level=fields.get('level', 'UNKNOWN'),
-                    service=fields.get('service', 'unknown'),
-                    message=fields.get('message', line),
-                    metadata={k: v for k, v in fields.items()
-                              if k not in ('timestamp', 'level', 'service', 'message')}
-                )
-        else:
-            # Default parsing logic - attempt to identify common log formats
+    Args:
+        line: The log line text
+        custom_pattern: Optional regex pattern to use
 
-            # Try to extract timestamp
-            timestamp = None
-            for format_str in self.DATETIME_FORMATS:
-                match = re.search(
-                    r'\d{4}-\d{2}-\d{2}[T ]?\d{2}:\d{2}:\d{2}', line)
-                if match:
-                    timestamp_str = match.group(0)
-                    try:
-                        timestamp = datetime.datetime.strptime(
-                            timestamp_str, format_str.split('.')[0])
-                        break
-                    except ValueError:
-                        continue
+    Returns:
+        LogEntry object or None if line couldn't be parsed
+    """
+    line = line.strip()
+    if not line:
+        return None
 
-            # Try to extract log level
-            level = "INFO"  # Default level
-            for lvl in self.LOG_LEVELS:
-                if f" {lvl} " in line or f"[{lvl}]" in line:
-                    level = lvl
-                    break
+    if custom_pattern:
+        # Use custom pattern if provided
+        pattern = re.compile(custom_pattern)
+        match = pattern.search(line)
+        if match:
+            # Extract fields based on named groups in the pattern
+            fields = match.groupdict()
 
-            # Try to extract service name - assuming it's between brackets or
-            # before a colon
-            service = "unknown"
-            bracket_match = re.search(r'\[([\w\-\.]+)\]', line)
-            if bracket_match:
-                service = bracket_match.group(1)
-            else:
-                # If not found in brackets, try to find it before a colon
-                colon_match = re.search(r'\b([\w\-\.]+):', line)
-                if colon_match:
-                    service = colon_match.group(1)
+            # Parse timestamp
+            timestamp_str = fields.get('timestamp', '')
+            timestamp = self._parse_timestamp(timestamp_str)
 
-            # Message is everything after the timestamp and level
-            message = line
-            if timestamp:
-                message = re.sub(
-                    r'^.*?' +
-                    re.escape(
-                        str(timestamp)),
-                    '',
-                    message).strip()
+            # Extract JSON metadata from message if present
+            message = fields.get('message', line)
+            message, extra_metadata = self._extract_json_metadata(message)
 
-            # Remove level and service from message
-            message = re.sub(
-                r'\b' +
-                re.escape(level) +
-                r'\b',
-                '',
-                message).strip()
-            message = re.sub(
-                r'\[' + re.escape(service) + r'\]',
-                '',
-                message).strip()
-            message = message.lstrip(':').strip()
-
-            # Extract and store any JSON data in the message
-            metadata = {}
-            try:
-                # Look for JSON-like content in the message
-                json_match = re.search(r'(\{.*\})', message)
-                if json_match:
-                    json_str = json_match.group(1)
-                    # Try to parse it as JSON
-                    json_data = json.loads(json_str)
-                    if isinstance(json_data, dict):
-                        metadata = json_data
-                        # Remove the JSON from the message
-                        message = re.sub(r'(\{.*\})', '', message).strip()
-            except (json.JSONDecodeError, ValueError):
-                pass
+            metadata = {
+                k: v for k,
+                v in fields.items() if k not in (
+                    'timestamp',
+                    'level',
+                    'service',
+                    'message')}
+            metadata.update(extra_metadata)
 
             return LogEntry(
                 timestamp=timestamp or datetime.datetime.now(),
-                level=level,
-                service=service,
+                level=fields.get('level', 'UNKNOWN'),
+                service=fields.get('service', 'unknown'),
                 message=message,
                 metadata=metadata
             )
+    else:
+        # Default parsing logic - attempt to identify common log formats
+
+        # Try to extract timestamp
+        timestamp = None
+        for format_str in self.DATETIME_FORMATS:
+            match = re.search(r'\d{4}-\d{2}-\d{2}[T ]?\d{2}:\d{2}:\d{2}', line)
+            if match:
+                timestamp_str = match.group(0)
+                try:
+                    timestamp = datetime.datetime.strptime(
+                        timestamp_str, format_str.split('.')[0])
+                    break
+                except ValueError:
+                    continue
+
+        # Try to extract log level
+        level = "INFO"  # Default level
+        for lvl in self.LOG_LEVELS:
+            if f" {lvl} " in line or f"[{lvl}]" in line:
+                level = lvl
+                break
+
+        # Try to extract service name - assuming it's between brackets or
+        # before a colon
+        service = "unknown"
+        bracket_match = re.search(r'\[([\w\-\.]+)\]', line)
+        if bracket_match:
+            service = bracket_match.group(1)
+        else:
+            # If not found in brackets, try to find it before a colon
+            colon_match = re.search(r'\b([\w\-\.]+):', line)
+            if colon_match:
+                service = colon_match.group(1)
+
+        # Message is everything after the timestamp and level
+        message = line
+        if timestamp:
+            message = re.sub(
+                r'^.*?' +
+                re.escape(
+                    str(timestamp)),
+                '',
+                message).strip()
+
+        # Remove level and service from message
+        message = re.sub(r'\b' + re.escape(level) + r'\b', '', message).strip()
+        message = re.sub(
+            r'\[' + re.escape(service) + r'\]',
+            '',
+            message).strip()
+        message = message.lstrip(':').strip()
+
+        # Extract and store any JSON data in the message using the helper
+        # function
+        message, metadata = self._extract_json_metadata(message)
+
+        return LogEntry(
+            timestamp=timestamp or datetime.datetime.now(),
+            level=level,
+            service=service,
+            message=message,
+            metadata=metadata
+        )
 
     def _parse_timestamp(
             self, timestamp_str: str) -> Optional[datetime.datetime]:
@@ -342,18 +361,17 @@ class LogAnalyzer:
                     if query in entry.message]
 
     def get_error_summary(self) -> Dict[str, int]:
-        """
-        Get a summary of error counts by service.
+    """
+    Get a summary of error counts by service.
 
-        Returns:
-            Dictionary mapping service names to error counts
-        """
-        error_counts = defaultdict(int)
-        for entry in self.entries:
-            if entry.level in ["ERROR", "CRITICAL"]:
-                service_key = entry.service.lower()
-                error_counts[service_key] += 1
-        return dict(error_counts)
+    Returns:
+        Dictionary mapping service names to error counts
+    """
+    error_counts = defaultdict(int)
+    for entry in self.entries:
+        if entry.level in ["ERROR", "CRITICAL"]:
+            error_counts[entry.service.lower()] += 1
+    return dict(error_counts)
 
     def get_activity_timeline(
             self, interval_minutes: int = 60) -> Dict[str, int]:
@@ -396,58 +414,61 @@ class LogAnalyzer:
 
         return timeline
 
-    def find_patterns(self, min_occurrences: int = 5) -> List[Tuple[str, int]]:
-        """
-        Find common patterns in log messages.
+    def replace_placeholders(message: str) -> str:
+    IP_PATTERN = re.compile(r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b')
+    UUID_PATTERN = re.compile(
+        r'\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b')
+    TIMESTAMP_PATTERN = re.compile(
+        r'\b\d{4}-\d{2}-\d{2}[T ]?\d{2}:\d{2}:\d{2}(?:\.\d+)?\b')
+    URL_PATTERN = re.compile(r'https?://[\w\-\.]+(?:/[\w\-\./]*)?')
+    NUMBER_PATTERN = re.compile(r'\b\d+\b')
+    template = message
+    template = IP_PATTERN.sub('<IP>', template)
+    template = UUID_PATTERN.sub('<UUID>', template)
+    template = TIMESTAMP_PATTERN.sub('<TIMESTAMP>', template)
+    template = URL_PATTERN.sub('<URL>', template)
+    template = NUMBER_PATTERN.sub('<NUMBER>', template)
+    return template
 
-        Args:
-            min_occurrences: Minimum number of occurrences to consider a pattern
 
-        Returns:
-            List of (pattern, count) tuples sorted by frequency
-        """
-        # Extract message templates by replacing specific values with
-        # placeholders
-        templates = []
+def find_patterns(self, min_occurrences: int = 5) -> List[Tuple[str, int]]:
+    """
+    Find common patterns in log messages.
 
-        # Create a cache for processed messages to avoid duplicate processing
-        processed_messages = {}
+    Args:
+        min_occurrences: Minimum number of occurrences to consider a pattern
 
-        for entry in self.entries:
-            # Skip if we've already processed this exact message
-            if entry.message in processed_messages:
-                templates.append(processed_messages[entry.message])
-                continue
+    Returns:
+        List of (pattern, count) tuples sorted by frequency
+    """
+    # Extract message templates by replacing specific values with
+    # placeholders
+    templates = []
 
-            # Replace IPs, timestamps, UUIDs, etc. with placeholders
-            template = entry.message
-            template = re.sub(
-                r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b',
-                '<IP>',
-                template)
-            template = re.sub(r'\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b',
-                              '<UUID>', template)
-            template = re.sub(r'\b\d{4}-\d{2}-\d{2}[T ]?\d{2}:\d{2}:\d{2}(?:\.\d+)?\b',
-                              '<TIMESTAMP>', template)
-            # Add URL pattern detection
-            template = re.sub(
-                r'https?://[\w\-\.]+(?:/[\w\-\./]*)?',
-                '<URL>',
-                template)
-            template = re.sub(r'\b\d+\b', '<NUMBER>', template)
+    # Create a cache for processed messages to avoid duplicate processing
+    processed_messages = {}
 
-            # Store in cache
-            processed_messages[entry.message] = template
-            templates.append(template)
+    for entry in self.entries:
+        # Skip if we've already processed this exact message
+        if entry.message in processed_messages:
+            templates.append(processed_messages[entry.message])
+            continue
 
-        # Count template occurrences
-        counter = Counter(templates)
+        # Replace placeholders using helper function
+        template = replace_placeholders(entry.message)
 
-        # Filter by minimum occurrences and sort by frequency
-        patterns = [(pattern, count) for pattern, count in counter.items()
-                    if count >= min_occurrences]
+        # Store in cache
+        processed_messages[entry.message] = template
+        templates.append(template)
 
-        return sorted(patterns, key=lambda x: x[1], reverse=True)
+    # Count template occurrences
+    counter = Counter(templates)
+
+    # Filter by minimum occurrences and sort by frequency
+    patterns = [(pattern, count)
+                for pattern, count in counter.items() if count >= min_occurrences]
+
+    return sorted(patterns, key=lambda x: x[1], reverse=True)
 
     def export_to_json(self, output_file: str) -> None:
         """
@@ -511,66 +532,68 @@ class LogAnalyzer:
 
     def analyze_error_cascades(
             self, time_window: int = 60) -> List[Dict[str, Any]]:
-        """
-        Analyze error cascades across services within a specified time window.
+    """
+    Analyze error cascades across services within a specified time window.
 
-        This method identifies chains of errors that occur across different services
-        within a given time window, helping detect error propagation in distributed systems.
+    This method identifies chains of errors that occur across different services
+    within a given time window, helping detect error propagation in distributed systems.
 
-        Args:
-            time_window: Time window in seconds to consider for related errors
+    Args:
+        time_window: Time window in seconds to consider for related errors
 
-        Returns:
-            List of error cascade information, each containing:
-            - start_time: When the cascade began
-            - services: List of services involved in order
-            - error_count: Total number of errors in the cascade
-            - duration: Total duration of the cascade in seconds
-        """
-        if not self.entries:
-            return []
+    Returns:
+        List of error cascade information, each containing:
+        - start_time: When the cascade began
+        - services: List of services involved in order
+        - error_count: Total number of errors in the cascade
+        - duration: Total duration of the cascade in seconds
+    """
+    if not self.entries:
+        return []
 
-        error_entries = sorted(
-            [e for e in self.entries if e.level in ["ERROR", "CRITICAL"]],
-            key=lambda x: x.timestamp
-        )
+    error_entries = sorted(
+        [e for e in self.entries if e.level in ["ERROR", "CRITICAL"]],
+        key=lambda x: x.timestamp
+    )
 
-        if not error_entries:
-            return []
+    if not error_entries:
+        return []
 
-        cascades = []
-        current_cascade = None
+    cascades = []
+    current_cascade = None
 
-        for entry in error_entries:
-            if (not current_cascade or
-                    (entry.timestamp - current_cascade["last_error"]).total_seconds() > time_window):
-                if current_cascade and len(current_cascade["services"]) > 1:
-                    cascades.append({
-                        "start_time": current_cascade["start_time"].isoformat(),
-                        "services": current_cascade["services"],
-                        "error_count": current_cascade["error_count"],
-                        "duration": (current_cascade["last_error"] -
-                                     current_cascade["start_time"]).total_seconds()
-                    })
-                current_cascade = {
-                    "start_time": entry.timestamp,
-                    "last_error": entry.timestamp,
-                    "services": [entry.service],
-                    "error_count": 1
-                }
-            else:
-                if entry.service not in current_cascade["services"][-1:]:
-                    current_cascade["services"].append(entry.service)
-                current_cascade["last_error"] = entry.timestamp
-                current_cascade["error_count"] += 1
+    for entry in error_entries:
+        if (not current_cascade or
+                (entry.timestamp - current_cascade["last_error"]).total_seconds() > time_window):
+            if current_cascade and len(current_cascade["services"]) > 1:
+                cascades.append({
+                    "start_time": current_cascade["start_time"].isoformat(),
+                    "services": current_cascade["services"],
+                    "error_count": current_cascade["error_count"],
+                    "duration": (current_cascade["last_error"] -
+                                 current_cascade["start_time"]).total_seconds()
+                })
+            current_cascade = {
+                "start_time": entry.timestamp,
+                "last_error": entry.timestamp,
+                "services": [entry.service],
+                "error_count": 1
+            }
+        else:
+            # Update error cascade if the service of the current entry is
+            # different from the last recorded service
+            if entry.service != current_cascade["services"][-1]:
+                current_cascade["services"].append(entry.service)
+            current_cascade["last_error"] = entry.timestamp
+            current_cascade["error_count"] += 1
 
-        if current_cascade and len(current_cascade["services"]) > 1:
-            cascades.append({
-                "start_time": current_cascade["start_time"].isoformat(),
-                "services": current_cascade["services"],
-                "error_count": current_cascade["error_count"],
-                "duration": (current_cascade["last_error"] -
-                             current_cascade["start_time"]).total_seconds()
-            })
+    if current_cascade and len(current_cascade["services"]) > 1:
+        cascades.append({
+            "start_time": current_cascade["start_time"].isoformat(),
+            "services": current_cascade["services"],
+            "error_count": current_cascade["error_count"],
+            "duration": (current_cascade["last_error"] -
+                         current_cascade["start_time"]).total_seconds()
+        })
 
-        return cascades
+    return cascades
