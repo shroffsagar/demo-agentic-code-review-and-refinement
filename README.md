@@ -1,4 +1,4 @@
-A demo project to show agentic code review and refinement on the github PR
+A demo project to show agentic code review and refinement on the github PR. Check the PR of this project.
 
 # Log Analyzer
 
